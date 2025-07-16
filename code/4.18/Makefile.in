@@ -1,0 +1,112 @@
+############################ kernel specific compile ###############################
+ifneq ($(KERNELRELEASE),)
+# We were called by kbuild
+# Do NOT indent stuff in this part! It has to be like this to make the
+# $(error ... ) stuff work
+
+ifneq ($(CONFIG_HID_WACOM),y)
+WCM_VERSION := $(shell cd $(KBUILD_EXTMOD)/.. && ./git-version-gen)
+ccflags-y := -DWACOM_VERSION_SUFFIX=\"-$(WCM_VERSION)\" -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers
+wacom-objs := wacom_wac.o wacom_sys.o
+obj-m += wacom.o
+obj-m += wacom_w8001.o
+obj-m += wacom_i2c.o
+else
+$(error You requested to build wacom with configure, but wacom is configured as built-in in your kernel config)
+endif # CONFIG_HID_WACOM
+
+LINUXINCLUDE := $(subst -I, -isystem, $(LINUXINCLUDE))
+
+else  # We were called from command line
+PWD  := $(shell pwd)
+UPDATE_INITRAMFS := $(shell command -v update-initramfs 2>/dev/null)
+DRACUT := $(shell command -v dracut 2>/dev/null)
+
+WCM_KERNEL_DIR := @WCM_KERNEL_DIR@
+MODUTS := @MODUTS@
+WCM_KERNEL_VER := @WCM_KERNEL_VER@
+MODSIGN_HASHALGO := @MODSIGN_HASHALGO@
+MODSIGN_PRIVFILE := @MODSIGN_PRIVFILE@
+MODSIGN_CERTFILE := @MODSIGN_CERTFILE@
+
+MODSIGN_COMMAND :=
+ifneq ($(strip $(MODSIGN_HASHALGO)),)
+ifneq ($(strip $(MODSIGN_PRIVFILE)),)
+ifneq ($(strip $(MODSIGN_CERTFILE)),)
+MODSIGN_COMMAND := "$(WCM_KERNEL_DIR)/scripts/sign-file" "$(MODSIGN_HASHALGO)" "$(MODSIGN_PRIVFILE)" "$(MODSIGN_CERTFILE)"
+endif
+endif
+endif
+
+all:
+	@echo '    Building input-wacom drivers for $(WCM_KERNEL_VER) kernel.'
+	$(MAKE) -C $(WCM_KERNEL_DIR) M=$(PWD) $(EXTRA_MAKEFLAGS)
+
+clean:
+	$(MAKE) -C $(WCM_KERNEL_DIR) M=$(PWD) clean
+
+signature: all
+	$(MODSIGN_COMMAND) wacom.ko
+	$(MODSIGN_COMMAND) wacom_w8001.ko
+	$(MODSIGN_COMMAND) wacom_i2c.ko
+
+kernel_install:
+	$(MAKE) -C $(WCM_KERNEL_DIR) M=$(PWD) modules_install mod_sign_cmd='$(MODSIGN_COMMAND)'
+
+depmod: SEARCH_EXTRA=$(strip $(wildcard /lib/modules/$(MODUTS)/extra/wacom.ko*))
+depmod: SEARCH_UPDATES=$(strip $(wildcard /lib/modules/$(MODUTS)/updates/wacom.ko*))
+depmod: MODINST_DIR=$(strip $(if $(SEARCH_EXTRA), extra, $(if $(SEARCH_UPDATES), updates)))
+depmod:
+	$(if $(MODINST_DIR),,$(error Could not find where driver was installed))
+	mkdir -p /etc/depmod.d
+	echo "override wacom * $(MODINST_DIR)" > /etc/depmod.d/input-wacom.conf
+	echo "override wacom_w8001 * $(MODINST_DIR)" >> /etc/depmod.d/input-wacom.conf
+	echo "override wacom_i2c * $(MODINST_DIR)" >> /etc/depmod.d/input-wacom.conf
+	PATH="$(PATH):/bin:/sbin" depmod -a $(MODUTS)
+ifdef UPDATE_INITRAMFS
+	$(UPDATE_INITRAMFS) -u -k $(MODUTS)
+endif
+ifdef DRACUT
+	echo 'add_drivers+=" wacom wacom_w8001 wacom_i2c "' > /etc/dracut.conf.d/input-wacom.conf
+	$(DRACUT) -f --kver=$(MODUTS)
+endif
+
+install modules_install: kernel_install depmod
+
+uninstall: SEARCH_EXTRA=$(strip $(wildcard /lib/modules/$(MODUTS)/extra/wacom.ko*))
+uninstall: SEARCH_UPDATES=$(strip $(wildcard /lib/modules/$(MODUTS)/updates/wacom.ko*))
+uninstall: MODINST_DIR=$(strip $(if $(SEARCH_EXTRA), extra, $(if $(SEARCH_UPDATES), updates)))
+uninstall:
+	@# Debian uses symlinks in the path to WCM_KERNEL_DIR
+	@# which causes trouble for tools like 'rm' which don't
+	@# see the path how you might think. As a workaround,
+	@# first cd into the directory and then remove.
+	cd /lib/modules/$(MODUTS)/$(MODINST_DIR); rm wacom*.ko*
+	rm -f /etc/depmod.d/input-wacom*.conf
+	PATH="$(PATH):/bin:/sbin" depmod -a $(MODUTS)
+ifdef UPDATE_INITRAMFS
+	$(UPDATE_INITRAMFS) -u -k $(MODUTS)
+endif
+ifdef DRACUT
+	rm -f /etc/dracut.conf.d/input-wacom.conf
+	$(DRACUT) -f --kver=$(MODUTS)
+endif
+
+endif  # End kbuild check
+
+######################### Version independent targets ##########################
+
+distclean: clean
+
+DISTFILES = wacom.h wacom_sys.c wacom_w8001.c wacom_wac.c wacom_wac.h wacom_i2c.c
+
+distdir:
+	for file in $(DISTFILES); do \
+	    cp -fpR ./$$file "$(distdir)" || exit 1; \
+	done
+
+EMPTY_AUTOMAKE_TARGETS = install-data install-exec uninstall install-info
+EMPTY_AUTOMAKE_TARGETS += installdirs check dvi pdf ps info html tags ctags mostlyclean maintainer-clean
+EMPTY_AUTOMAKE_TARGETS += signature depmod kernel_install
+.PHONY: $(EMPTY_AUTOMAKE_TARGETS)
+	$(EMPTY_AUTOMAKE_TARGETS):
