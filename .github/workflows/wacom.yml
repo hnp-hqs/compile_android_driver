@@ -1,0 +1,87 @@
+name: Android Wacom Driver Builder
+
+on:
+  workflow_dispatch:
+    inputs:
+      android_version:
+        description: 'Android Version (e.g., 14)'
+        required: true
+      kernel_version:
+        description: 'Kernel Version (e.g., 6.1)'
+        required: true
+      target_arch:
+        description: 'Target Architecture (aarch64, x86_64, etc.)'
+        required: true
+        default: 'aarch64'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4.2.2
+        
+      - name: Prepare kerneldriver directory
+        run: |
+          mkdir -p kerneldriver
+          cp -r ./code/* kerneldriver/
+          
+      - name: Install repo tool
+        run: |
+          sudo curl -L https://storage.googleapis.com/git-repo-downloads/repo -o /usr/local/bin/repo
+          sudo chmod a+x /usr/local/bin/repo
+
+      - name: Set up Android Kernel source
+        run: |
+          mkdir -p android-kernel && cd android-kernel
+          repo init -u https://android.googlesource.com/kernel/manifest -b common-android${{ github.event.inputs.android_version }}-${{ github.event.inputs.kernel_version }}
+          repo sync -j$(nproc) -c --no-tags --optimized-fetch --force-sync
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential flex bison libssl-dev libelf-dev bc python-is-python3 \
+                                 libncurses-dev autoconf automake libtool pkg-config
+
+      # 新增配置步骤
+      - name: Configure kernel
+        run: |
+          cd android-kernel
+          # 运行配置脚本
+          if [ -f ../kerneldriver/configure ]; then
+            cd ../kerneldriver
+            ./configure --kernel-dir=../android-kernel/common --arch=${{ github.event.inputs.target_arch }}
+          fi
+
+      - name: Build driver modules
+        run: |
+          cd kerneldriver
+          # 先执行make clean确保干净构建
+          make clean || true
+          
+          # 设置编译环境变量
+          export KERNEL_SRC=../android-kernel/common
+          export ARCH=${{ github.event.inputs.target_arch }}
+          
+          # 根据架构设置交叉编译工具链
+          if [ "$ARCH" = "aarch64" ]; then
+            export CROSS_COMPILE=aarch64-linux-android-
+          elif [ "$ARCH" = "x86_64" ]; then
+            export CROSS_COMPILE=x86_64-linux-android-
+          fi
+          
+          # 执行make编译
+          make -j$(nproc) all
+
+      - name: Find and list all .ko files
+        run: |
+          cd kerneldriver
+          echo "Generated .ko files:"
+          find . -name "*.ko" -print
+
+      - name: Upload all kernel modules
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: kernel-modules-${{ github.event.inputs.target_arch }}
+          path: kerneldriver/**/*.ko
