@@ -1,4 +1,4 @@
-name: Android Wacom Driver Builder
+name: Android Kernel Driver Builder
 
 on:
   workflow_dispatch:
@@ -21,64 +21,106 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4.2.2
+        # 添加详细日志输出
+        with:
+          fetch-depth: 0  # 获取完整历史记录有助于调试
         
       - name: Prepare kerneldriver directory
         run: |
+          echo "准备kerneldriver目录..."
           mkdir -p kerneldriver
-          cp -r ./code/* kerneldriver/
+          echo "复制代码到kerneldriver..."
+          cp -rv ./code/* kerneldriver/  # -v 显示详细复制过程
+          echo "目录内容:"
+          ls -lR kerneldriver/
           
       - name: Install repo tool
         run: |
+          echo "安装repo工具..."
           sudo curl -L https://storage.googleapis.com/git-repo-downloads/repo -o /usr/local/bin/repo
           sudo chmod a+x /usr/local/bin/repo
-
+          echo "repo版本: $(repo --version)"
+        
       - name: Set up Android Kernel source
         run: |
+          echo "设置Android内核源码..."
           mkdir -p android-kernel && cd android-kernel
           repo init -u https://android.googlesource.com/kernel/manifest -b common-android${{ github.event.inputs.android_version }}-${{ github.event.inputs.kernel_version }}
-          repo sync -j$(nproc) -c --no-tags --optimized-fetch --force-sync
-
+          # 添加详细输出参数
+          repo sync -j$(nproc) -c --no-tags --optimized-fetch --force-sync --verbose
+          echo "内核源码大小: $(du -sh .)"
+        
       - name: Install dependencies
         run: |
+          echo "安装依赖项..."
           sudo apt-get update
           sudo apt-get install -y build-essential flex bison libssl-dev libelf-dev bc python-is-python3 \
                                  libncurses-dev autoconf automake libtool pkg-config
+          echo "已安装依赖项"
 
-      # 新增配置步骤
+      # 配置步骤添加详细输出
       - name: Configure kernel
         run: |
-          cd android-kernel
-          # 运行配置脚本
-          if [ -f ../kerneldriver/configure ]; then
-            cd ../kerneldriver
-            ./configure --kernel-dir=../android-kernel/common --arch=${{ github.event.inputs.target_arch }}
+          echo "===== 开始配置步骤 ====="
+          echo "当前目录: $(pwd)"
+          echo "检查configure脚本是否存在..."
+          
+          if [ -f kerneldriver/configure ]; then
+            echo "找到configure脚本，执行配置..."
+            cd kerneldriver
+            chmod +x configure  # 确保有执行权限
+            ./configure --kernel-dir=../android-kernel/common --arch=${{ github.event.inputs.target_arch }} | tee configure.log
+            echo "配置完成，日志:"
+            cat configure.log
+          else
+            echo "未找到configure脚本，跳过配置步骤"
+            # 创建空配置确保make能运行
+            touch kerneldriver/config.mk
           fi
+          echo "===== 配置步骤结束 ====="
 
+      # 构建步骤添加详细输出
       - name: Build driver modules
         run: |
+          echo "===== 开始构建步骤 ====="
           cd kerneldriver
-          # 先执行make clean确保干净构建
-          make clean || true
+          echo "当前目录: $(pwd)"
           
-          # 设置编译环境变量
+          # 清理构建
+          echo "执行清理..."
+          make clean || echo "清理完成或无需清理"
+          
+          # 设置环境变量
           export KERNEL_SRC=../android-kernel/common
           export ARCH=${{ github.event.inputs.target_arch }}
           
-          # 根据架构设置交叉编译工具链
+          echo "内核源码路径: $KERNEL_SRC"
+          echo "目标架构: $ARCH"
+          
+          # 设置交叉编译工具链
           if [ "$ARCH" = "aarch64" ]; then
             export CROSS_COMPILE=aarch64-linux-android-
           elif [ "$ARCH" = "x86_64" ]; then
             export CROSS_COMPILE=x86_64-linux-android-
           fi
+          echo "交叉编译工具: $CROSS_COMPILE"
           
-          # 执行make编译
-          make -j$(nproc) all
+          # 执行构建并输出详细日志
+          echo "开始编译..."
+          make -j$(nproc) V=1 2>&1 | tee build.log  # V=1 启用详细输出
+          
+          echo "编译完成，构建日志:"
+          cat build.log
+          echo "生成的.ko文件:"
+          find . -name "*.ko" -ls
+          echo "===== 构建步骤结束 ====="
 
       - name: Find and list all .ko files
         run: |
+          echo "查找所有.ko文件..."
           cd kerneldriver
-          echo "Generated .ko files:"
-          find . -name "*.ko" -print
+          find . -name "*.ko" -print -exec ls -l {} \;
+          echo "找到 $(find . -name "*.ko" | wc -l) 个.ko文件"
 
       - name: Upload all kernel modules
         uses: actions/upload-artifact@v4.6.2
